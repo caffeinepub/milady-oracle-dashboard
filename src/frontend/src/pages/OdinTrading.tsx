@@ -6,12 +6,13 @@ import { cn } from "@/lib/utils";
 import {
   ArrowUpDown,
   RefreshCw,
+  Search,
   TrendingDown,
   TrendingUp,
   Zap,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Line,
   LineChart,
@@ -23,8 +24,23 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 import { AssetType, TradeType } from "../backend.d";
-import type { TradeRecord } from "../backend.d";
-import { BTC_USD_PRICE, marketRunes, mockTrades } from "../mocks/backend";
+import { DataSourceBadge } from "../components/DataSourceBadge";
+import {
+  BTC_USD_PRICE,
+  type MarketRune,
+  marketRunes,
+  mockTrades,
+} from "../mocks/backend";
+import type { MarketDataStatus } from "../services/liveMarket";
+import {
+  type OdinDataStatus,
+  fetchOdinBtcPrice,
+  fetchOdinTokenFeed,
+  fetchOdinTokenTrades,
+  fetchOdinTokens,
+  mapOdinTokenToRune,
+  odinRawToBtc,
+} from "../services/odinFunApi";
 
 interface PricePoint {
   time: string;
@@ -98,24 +114,172 @@ function ChartTooltip({
   );
 }
 
-export function OdinTrading() {
-  const [selectedRune, setSelectedRune] = useState(marketRunes[0]);
+interface OdinTradingProps {
+  liveRunes?: MarketRune[];
+  marketStatus?: MarketDataStatus | null;
+}
+
+export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
+  // ── Odin.Fun live data state ────────────────────────────────────────────────
+  const [odinTokens, setOdinTokens] = useState<MarketRune[]>([]);
+  const [odinStatus, setOdinStatus] = useState<OdinDataStatus | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [feedData, setFeedData] = useState<PricePoint[]>([]);
+  const [btcUsdPrice, setBtcUsdPrice] = useState(BTC_USD_PRICE);
+
+  // Live trades from Odin API
+  const [liveTradeRows, setLiveTradeRows] = useState<
+    { id: string; side: string; amount: number; btc: number; time: number }[]
+  >([]);
+
+  // ── Determine active rune list (Odin > Hiro > mock) ────────────────────────
+  const activeRunes = useMemo(() => {
+    if (odinTokens.length > 0) return odinTokens;
+    if (liveRunes && liveRunes.length > 0) return liveRunes;
+    return marketRunes;
+  }, [odinTokens, liveRunes]);
+
+  // Filter by search query
+  const filteredRunes = useMemo(() => {
+    if (!searchQuery.trim()) return activeRunes;
+    const q = searchQuery.toLowerCase();
+    return activeRunes.filter(
+      (r) =>
+        r.runeName.toLowerCase().includes(q) ||
+        r.symbol.toLowerCase().includes(q),
+    );
+  }, [activeRunes, searchQuery]);
+
+  const [selectedRune, setSelectedRune] = useState(activeRunes[0]);
   const [tradeType, setTradeType] = useState<"buy" | "sell">("buy");
   const [amount, setAmount] = useState("");
-  const [price, setPrice] = useState(marketRunes[0].currentPrice.toFixed(8));
+  const [price, setPrice] = useState(activeRunes[0].currentPrice.toFixed(8));
   const [isLoading, setIsLoading] = useState(false);
 
+  // ── Load Odin tokens on mount ───────────────────────────────────────────────
+  useEffect(() => {
+    async function loadOdinData() {
+      const [tokensResult, btcResult] = await Promise.allSettled([
+        fetchOdinTokens({ sort: "marketcap:desc", limit: 50 }),
+        fetchOdinBtcPrice(),
+      ]);
+
+      if (btcResult.status === "fulfilled" && btcResult.value.price > 0) {
+        setBtcUsdPrice(btcResult.value.price);
+      }
+
+      const btcPrice =
+        btcResult.status === "fulfilled"
+          ? btcResult.value.price
+          : BTC_USD_PRICE;
+
+      if (tokensResult.status === "fulfilled") {
+        const raw = tokensResult.value;
+        const list = raw.data ?? (Array.isArray(raw) ? (raw as unknown[]) : []);
+        const mapped = (list as Parameters<typeof mapOdinTokenToRune>[0][]).map(
+          (t) => mapOdinTokenToRune(t, btcPrice),
+        );
+        const withPrice = mapped.filter((r) => r.currentPrice > 0);
+        if (withPrice.length > 0) {
+          setOdinTokens(withPrice);
+          setSelectedRune(withPrice[0]);
+          setPrice(withPrice[0].currentPrice.toFixed(8));
+          setOdinStatus({ source: "live", updatedAt: Date.now() });
+          return;
+        }
+      }
+
+      // Fall back
+      setOdinStatus({
+        source: "mock",
+        updatedAt: Date.now(),
+        error:
+          tokensResult.status === "rejected"
+            ? String(tokensResult.reason)
+            : "No priced tokens",
+      });
+    }
+
+    loadOdinData().catch(() =>
+      setOdinStatus({
+        source: "mock",
+        updatedAt: Date.now(),
+        error: "Failed to load",
+      }),
+    );
+  }, []);
+
+  // ── Sync selectedRune when odinTokens first populates ─────────────────────
+  // (handled inside loadOdinData above)
+
+  // ── Load feed when selectedRune changes (only if live) ─────────────────────
+  useEffect(() => {
+    if (!selectedRune || odinStatus?.source !== "live") return;
+    let cancelled = false;
+
+    async function loadFeed() {
+      try {
+        const feed = await fetchOdinTokenFeed(selectedRune.runeId, {
+          resolution: 60,
+          last: 48,
+        });
+        if (cancelled) return;
+        if (Array.isArray(feed) && feed.length > 0) {
+          const mapped = feed.map((f) => ({
+            time: new Date(f.time * 1000).toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }),
+            price: odinRawToBtc(f.close ?? f.price ?? 0),
+            open: odinRawToBtc(f.open ?? 0),
+            close: odinRawToBtc(f.close ?? f.price ?? 0),
+          }));
+          setFeedData(mapped);
+        }
+      } catch {
+        // silently ignore — chart falls back to generated mock
+      }
+
+      // Also load recent trades
+      try {
+        const trades = await fetchOdinTokenTrades(selectedRune.runeId, 10);
+        if (cancelled) return;
+        if (Array.isArray(trades) && trades.length > 0) {
+          setLiveTradeRows(
+            trades.map((t, i) => ({
+              id: t.id ?? String(i),
+              side: t.side ?? "buy",
+              amount: t.amount ?? 0,
+              btc: odinRawToBtc(t.btc ?? t.price ?? 0),
+              time: t.time ?? t.timestamp ?? 0,
+            })),
+          );
+        }
+      } catch {
+        // silently ignore
+      }
+    }
+
+    loadFeed();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRune, odinStatus?.source]);
+
   const chartData = useMemo(
-    () => generatePriceChart(selectedRune.currentPrice),
+    () => generatePriceChart(selectedRune?.currentPrice ?? 0),
     [selectedRune],
   );
+  const displayChart = feedData.length > 0 ? feedData : chartData;
+
   const orderBook = useMemo(
-    () => generateOrderBook(selectedRune.currentPrice),
+    () => generateOrderBook(selectedRune?.currentPrice ?? 0),
     [selectedRune],
   );
 
   const totalCost = Number(amount || 0) * Number(price || 0);
-  const isPositive = selectedRune.priceChange24h >= 0;
+  const isPositive = (selectedRune?.priceChange24h ?? 0) >= 0;
 
   const recentTrades = useMemo(
     () =>
@@ -129,9 +293,12 @@ export function OdinTrading() {
     [],
   );
 
-  function handleSelectRune(rune: (typeof marketRunes)[0]) {
+  function handleSelectRune(rune: MarketRune) {
     setSelectedRune(rune);
     setPrice(rune.currentPrice.toFixed(8));
+    // Clear stale feed data while new feed loads
+    setFeedData([]);
+    setLiveTradeRows([]);
   }
 
   async function handleTrade() {
@@ -148,13 +315,18 @@ export function OdinTrading() {
     setAmount("");
   }
 
+  // Combined status for header badge — prefer Odin live status
+  const displayStatus = odinStatus ?? marketStatus ?? null;
+
+  if (!selectedRune) return null;
+
   return (
     <main className="flex-1 overflow-y-auto p-4 lg:p-6">
       {/* Odin.Fun header */}
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
-        className="flex items-center gap-3 mb-4"
+        className="flex items-center gap-3 mb-4 flex-wrap"
       >
         <div className="flex items-center gap-2">
           <Zap size={16} className="neon-text-cyan" />
@@ -166,13 +338,15 @@ export function OdinTrading() {
         <p className="text-xs text-muted-foreground">
           Rune trading on Internet Computer
         </p>
-        <div className="ml-auto flex items-center gap-2">
-          <Badge
-            variant="outline"
-            className="text-[9px] h-4 border-green-400/30 text-green-400 bg-green-400/10"
-          >
-            ● LIVE
-          </Badge>
+        <div className="ml-auto flex items-center gap-2 flex-wrap">
+          {/* Odin live badge */}
+          {odinStatus?.source === "live" && (
+            <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[9px] font-mono font-bold border border-cyan-400/30 bg-cyan-400/10 text-cyan-400 tracking-[0.12em]">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+              ODIN LIVE
+            </span>
+          )}
+          <DataSourceBadge status={displayStatus} />
           <Badge
             variant="outline"
             className="text-[9px] h-4 border-primary/30 text-primary bg-primary/10"
@@ -189,11 +363,28 @@ export function OdinTrading() {
           animate={{ opacity: 1, x: 0 }}
           className="glass-card rounded-lg p-2 flex flex-col"
         >
+          {/* Search bar */}
+          <div className="relative mb-1.5">
+            <Search
+              size={10}
+              className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground"
+            />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search..."
+              className="h-6 pl-6 text-[9px] font-mono bg-muted/30 border-border/40 focus:border-primary/40"
+            />
+          </div>
+
           <div className="text-[9px] uppercase tracking-[0.15em] text-muted-foreground font-mono px-1 mb-1.5 pb-1 border-b border-border/30">
-            Markets
+            Markets{" "}
+            {odinTokens.length > 0 && (
+              <span className="text-cyan-400/70">({odinTokens.length})</span>
+            )}
           </div>
           <div className="flex-1 overflow-y-auto space-y-0.5 max-h-[40vh] lg:max-h-full">
-            {marketRunes.map((rune) => {
+            {filteredRunes.map((rune) => {
               const isPos = rune.priceChange24h >= 0;
               return (
                 <button
@@ -224,6 +415,11 @@ export function OdinTrading() {
                 </button>
               );
             })}
+            {filteredRunes.length === 0 && (
+              <div className="text-[9px] font-mono text-muted-foreground px-2 py-3 text-center">
+                No results
+              </div>
+            )}
           </div>
         </motion.div>
 
@@ -245,7 +441,7 @@ export function OdinTrading() {
                   {(selectedRune.currentPrice * 1e8).toFixed(0)} sats
                 </span>
                 <span className="text-xs text-muted-foreground font-mono">
-                  ${(selectedRune.currentPrice * BTC_USD_PRICE).toFixed(6)}
+                  ${(selectedRune.currentPrice * btcUsdPrice).toFixed(6)}
                 </span>
                 <span
                   className={cn(
@@ -282,7 +478,7 @@ export function OdinTrading() {
           {/* Price chart */}
           <div className="flex-1 min-h-[180px]">
             <ResponsiveContainer width="100%" height={200}>
-              <LineChart data={chartData}>
+              <LineChart data={displayChart}>
                 <XAxis
                   dataKey="time"
                   tick={{
@@ -409,6 +605,7 @@ export function OdinTrading() {
                   amount={amount}
                   price={price}
                   totalCost={totalCost}
+                  btcUsdPrice={btcUsdPrice}
                   onAmountChange={setAmount}
                   onPriceChange={setPrice}
                   onSubmit={handleTrade}
@@ -422,6 +619,7 @@ export function OdinTrading() {
                   amount={amount}
                   price={price}
                   totalCost={totalCost}
+                  btcUsdPrice={btcUsdPrice}
                   onAmountChange={setAmount}
                   onPriceChange={setPrice}
                   onSubmit={handleTrade}
@@ -433,32 +631,58 @@ export function OdinTrading() {
 
           {/* Recent trades */}
           <div className="glass-card rounded-lg p-3">
-            <div className="text-[9px] uppercase tracking-[0.15em] text-muted-foreground font-mono mb-2">
+            <div className="text-[9px] uppercase tracking-[0.15em] text-muted-foreground font-mono mb-2 flex items-center gap-1.5">
               Recent Trades
+              {liveTradeRows.length > 0 && (
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+              )}
             </div>
             <div className="space-y-1">
-              {recentTrades.slice(0, 6).map((trade) => (
-                <div
-                  key={trade.id}
-                  className="flex items-center justify-between text-[9px] font-mono"
-                >
-                  <span
-                    className={cn(
-                      trade.tradeType === TradeType.buy
-                        ? "neon-text-green"
-                        : "neon-text-pink",
-                    )}
-                  >
-                    {trade.tradeType === TradeType.buy ? "BUY" : "SELL"}
-                  </span>
-                  <span className="text-muted-foreground truncate max-w-[70px]">
-                    {trade.asset.split("•")[0]}
-                  </span>
-                  <span className="neon-text-btc">
-                    {trade.totalValue.toFixed(3)} BTC
-                  </span>
-                </div>
-              ))}
+              {liveTradeRows.length > 0
+                ? liveTradeRows.slice(0, 6).map((t) => (
+                    <div
+                      key={t.id}
+                      className="flex items-center justify-between text-[9px] font-mono"
+                    >
+                      <span
+                        className={cn(
+                          t.side === "buy" || t.side === "0"
+                            ? "neon-text-green"
+                            : "neon-text-pink",
+                        )}
+                      >
+                        {t.side === "buy" || t.side === "0" ? "BUY" : "SELL"}
+                      </span>
+                      <span className="text-muted-foreground truncate max-w-[70px]">
+                        {selectedRune.symbol}
+                      </span>
+                      <span className="neon-text-btc">
+                        {t.btc.toFixed(6)} BTC
+                      </span>
+                    </div>
+                  ))
+                : recentTrades.slice(0, 6).map((trade) => (
+                    <div
+                      key={trade.id}
+                      className="flex items-center justify-between text-[9px] font-mono"
+                    >
+                      <span
+                        className={cn(
+                          trade.tradeType === TradeType.buy
+                            ? "neon-text-green"
+                            : "neon-text-pink",
+                        )}
+                      >
+                        {trade.tradeType === TradeType.buy ? "BUY" : "SELL"}
+                      </span>
+                      <span className="text-muted-foreground truncate max-w-[70px]">
+                        {trade.asset.split("•")[0]}
+                      </span>
+                      <span className="neon-text-btc">
+                        {trade.totalValue.toFixed(3)} BTC
+                      </span>
+                    </div>
+                  ))}
             </div>
           </div>
         </motion.div>
@@ -468,11 +692,12 @@ export function OdinTrading() {
 }
 
 interface TradeFormProps {
-  rune: (typeof marketRunes)[0];
+  rune: MarketRune;
   tradeType: "buy" | "sell";
   amount: string;
   price: string;
   totalCost: number;
+  btcUsdPrice: number;
   onAmountChange: (v: string) => void;
   onPriceChange: (v: string) => void;
   onSubmit: () => void;
@@ -485,6 +710,7 @@ function TradeForm({
   amount,
   price,
   totalCost,
+  btcUsdPrice,
   onAmountChange,
   onPriceChange,
   onSubmit,
@@ -501,6 +727,7 @@ function TradeForm({
           Amount ({rune.symbol})
         </label>
         <Input
+          id="amount-input"
           value={amount}
           onChange={(e) => onAmountChange(e.target.value)}
           placeholder="0"
@@ -555,7 +782,7 @@ function TradeForm({
         <div className="flex justify-between text-[9px] font-mono">
           <span className="text-muted-foreground">USD Value</span>
           <span className="text-muted-foreground">
-            ${(totalCost * BTC_USD_PRICE).toFixed(2)}
+            ${(totalCost * btcUsdPrice).toFixed(2)}
           </span>
         </div>
         <div className="flex justify-between text-[9px] font-mono">

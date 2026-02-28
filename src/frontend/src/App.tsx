@@ -1,3 +1,9 @@
+// Augment the global BeforeInstallPromptEvent which isn't in lib.dom yet
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+}
+
 import { Toaster } from "@/components/ui/sonner";
 import type { Principal } from "@icp-sdk/core/principal";
 import { useCallback, useEffect, useState } from "react";
@@ -12,7 +18,11 @@ import type {
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { WalletConnectModal } from "./components/WalletConnectModal";
-import { mockBackend, portfolioHistory } from "./mocks/backend";
+import {
+  type MarketRune,
+  mockBackend,
+  portfolioHistory,
+} from "./mocks/backend";
 import { ActivityFeed } from "./pages/ActivityFeed";
 import { Dashboard } from "./pages/Dashboard";
 import { OdinTrading } from "./pages/OdinTrading";
@@ -20,6 +30,7 @@ import { OrdinalsMarket } from "./pages/OrdinalsMarket";
 import { Portfolio } from "./pages/Portfolio";
 import { RunesMarket } from "./pages/RunesMarket";
 import { Settings } from "./pages/Settings";
+import { type MarketDataStatus, fetchLiveRunes } from "./services/liveMarket";
 
 type Page =
   | "dashboard"
@@ -75,6 +86,10 @@ export default function App() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+  // PWA install prompt
+  const [installPrompt, setInstallPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
+
   // Data state — always show market data, wallet data populated on connect
   const [runeHoldings, setRuneHoldings] = useState<RuneHolding[]>([]);
   const [ordinals, setOrdinals] = useState<OrdinalItem[]>([]);
@@ -82,6 +97,22 @@ export default function App() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [wallets, setWallets] = useState<WalletRecord[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+
+  // Capture the beforeinstallprompt event for the Install App button
+  useEffect(() => {
+    const handler = (e: Event) => {
+      e.preventDefault();
+      setInstallPrompt(e as BeforeInstallPromptEvent);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  // Live market data
+  const [liveRunes, setLiveRunes] = useState<MarketRune[]>([]);
+  const [marketStatus, setMarketStatus] = useState<MarketDataStatus | null>(
+    null,
+  );
 
   // Load all data on mount
   useEffect(() => {
@@ -111,6 +142,19 @@ export default function App() {
     loadData();
   }, []);
 
+  // Fetch live runes market data on mount and every 60s
+  useEffect(() => {
+    async function loadMarket() {
+      const { runes, status } = await fetchLiveRunes();
+      setLiveRunes(runes);
+      setMarketStatus(status);
+    }
+    loadMarket();
+
+    const interval = setInterval(loadMarket, 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleWalletConnect = useCallback((wallet: WalletRecord) => {
     setConnectedWallet(wallet);
     // Add to wallets list if not already present
@@ -123,6 +167,13 @@ export default function App() {
   const navigate = useCallback((page: string) => {
     setCurrentPage(page as Page);
   }, []);
+
+  const handleInstall = useCallback(async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+  }, [installPrompt]);
 
   const defaultProfile: UserProfile = profile ?? {
     principal: { toString: () => "anonymous" } as unknown as Principal,
@@ -155,11 +206,19 @@ export default function App() {
           />
         );
       case "runes":
-        return <RunesMarket watchlist={watchlist} />;
+        return (
+          <RunesMarket
+            watchlist={watchlist}
+            liveRunes={liveRunes}
+            marketStatus={marketStatus}
+          />
+        );
       case "ordinals":
         return <OrdinalsMarket />;
       case "odin":
-        return <OdinTrading />;
+        return (
+          <OdinTrading liveRunes={liveRunes} marketStatus={marketStatus} />
+        );
       case "activity":
         return <ActivityFeed trades={trades} />;
       case "settings":
@@ -215,6 +274,8 @@ export default function App() {
           onConnectWallet={() => setShowWalletModal(true)}
           currentPage={currentPage}
           onNavigate={navigate}
+          installPrompt={installPrompt}
+          onInstall={handleInstall}
         />
 
         <div className="flex flex-1 min-h-0">

@@ -1,3 +1,4 @@
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
   ArrowRight,
@@ -7,7 +8,7 @@ import {
   Zap,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -28,6 +29,10 @@ import type {
 import { AssetType, TradeType } from "../backend.d";
 import { PriceCard } from "../components/PriceCard";
 import { BTC_USD_PRICE, marketRunes } from "../mocks/backend";
+import {
+  fetchOdinBtcPrice,
+  fetchOdinDashboardStats,
+} from "../services/odinFunApi";
 
 interface DashboardProps {
   connectedWallet: WalletRecord | null;
@@ -87,6 +92,14 @@ function CustomTooltip({
   );
 }
 
+// ── Market Pulse types ────────────────────────────────────────────────────────
+
+interface MarketPulse {
+  btcPrice: number | null;
+  activeTokens: number | null;
+  volume24h: number | null;
+}
+
 export function Dashboard({
   connectedWallet,
   runeHoldings,
@@ -96,6 +109,52 @@ export function Dashboard({
   onNavigate,
   onConnectWallet,
 }: DashboardProps) {
+  // ── Market Pulse from Odin.Fun ─────────────────────────────────────────────
+  const [marketPulse, setMarketPulse] = useState<MarketPulse>({
+    btcPrice: null,
+    activeTokens: null,
+    volume24h: null,
+  });
+  const [pulseLoading, setPulseLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPulse() {
+      try {
+        const [btcResult, statsResult] = await Promise.allSettled([
+          fetchOdinBtcPrice(),
+          fetchOdinDashboardStats(),
+        ]);
+
+        if (cancelled) return;
+
+        const btcPrice =
+          btcResult.status === "fulfilled" && btcResult.value.price > 0
+            ? btcResult.value.price
+            : null;
+
+        const stats =
+          statsResult.status === "fulfilled" ? statsResult.value : null;
+
+        setMarketPulse({
+          btcPrice,
+          activeTokens: stats?.active_tokens ?? stats?.total_tokens ?? null,
+          volume24h: stats?.volume_24h ?? stats?.total_volume ?? null,
+        });
+      } catch {
+        // silently fall back — pulse stays null
+      } finally {
+        if (!cancelled) setPulseLoading(false);
+      }
+    }
+
+    loadPulse();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Compute portfolio totals
   const totalRunesBtc = useMemo(
     () => runeHoldings.reduce((sum, r) => sum + r.amount * r.currentPrice, 0),
@@ -173,6 +232,74 @@ export function Dashboard({
           </button>
         </motion.div>
       )}
+
+      {/* Market Pulse row — live data from Odin.Fun */}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.05 }}
+        className="glass-card rounded-lg px-4 py-2.5 flex flex-wrap items-center gap-4"
+      >
+        <div className="flex items-center gap-1.5 text-[9px] font-mono uppercase tracking-[0.15em] text-muted-foreground">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+          Market Pulse
+        </div>
+        <div className="w-px h-4 bg-border/50 hidden sm:block" />
+
+        {/* BTC Price */}
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-mono text-muted-foreground/60 uppercase tracking-[0.12em]">
+            BTC
+          </span>
+          {pulseLoading ? (
+            <Skeleton className="h-3.5 w-20 bg-muted/40" />
+          ) : (
+            <span className="text-[11px] font-mono font-bold neon-text-btc">
+              {marketPulse.btcPrice != null
+                ? `$${marketPulse.btcPrice.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                : `$${BTC_USD_PRICE.toLocaleString()}`}
+            </span>
+          )}
+        </div>
+
+        <div className="w-px h-4 bg-border/30 hidden sm:block" />
+
+        {/* Active tokens */}
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-mono text-muted-foreground/60 uppercase tracking-[0.12em]">
+            Tokens
+          </span>
+          {pulseLoading ? (
+            <Skeleton className="h-3.5 w-12 bg-muted/40" />
+          ) : (
+            <span className="text-[11px] font-mono font-bold text-foreground">
+              {marketPulse.activeTokens != null
+                ? marketPulse.activeTokens.toLocaleString()
+                : "—"}
+            </span>
+          )}
+        </div>
+
+        <div className="w-px h-4 bg-border/30 hidden sm:block" />
+
+        {/* 24h Volume */}
+        <div className="flex items-center gap-2">
+          <span className="text-[9px] font-mono text-muted-foreground/60 uppercase tracking-[0.12em]">
+            24h Vol
+          </span>
+          {pulseLoading ? (
+            <Skeleton className="h-3.5 w-16 bg-muted/40" />
+          ) : (
+            <span className="text-[11px] font-mono font-bold neon-text-cyan">
+              {marketPulse.volume24h != null
+                ? marketPulse.volume24h > 1e6
+                  ? `${(marketPulse.volume24h / 1e6).toFixed(1)}M sats`
+                  : `${marketPulse.volume24h.toLocaleString("en-US", { maximumFractionDigits: 0 })} sats`
+                : "—"}
+            </span>
+          )}
+        </div>
+      </motion.div>
 
       {/* Stats row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

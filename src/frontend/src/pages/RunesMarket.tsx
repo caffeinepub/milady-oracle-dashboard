@@ -1,21 +1,19 @@
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import {
-  Search,
-  SlidersHorizontal,
-  TrendingDown,
-  TrendingUp,
-} from "lucide-react";
+import { Search, TrendingDown, TrendingUp } from "lucide-react";
 import { motion } from "motion/react";
 import { useMemo, useState } from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip } from "recharts";
 import type { WatchlistItem } from "../backend.d";
+import { DataSourceBadge } from "../components/DataSourceBadge";
 import { RuneRow } from "../components/RuneRow";
 import { BTC_USD_PRICE, type MarketRune, marketRunes } from "../mocks/backend";
+import type { MarketDataStatus } from "../services/liveMarket";
 
 interface RunesMarketProps {
   watchlist: WatchlistItem[];
+  liveRunes?: MarketRune[];
+  marketStatus?: MarketDataStatus | null;
 }
 
 type SortKey = "priceChange24h" | "volume24h" | "marketCap" | "currentPrice";
@@ -71,7 +69,11 @@ function MiniSparkline({
   );
 }
 
-export function RunesMarket({ watchlist }: RunesMarketProps) {
+export function RunesMarket({
+  watchlist,
+  liveRunes,
+  marketStatus,
+}: RunesMarketProps) {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("volume24h");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -81,16 +83,20 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
     ),
   );
 
+  // Use live data if available and non-empty, otherwise fall back to mock
+  const activeRunes =
+    liveRunes && liveRunes.length > 0 ? liveRunes : marketRunes;
+
   const sparklines = useMemo(
     () =>
       Object.fromEntries(
-        marketRunes.map((r, i) => [r.runeId, generateSparkline(i)]),
+        activeRunes.map((r, i) => [r.runeId, generateSparkline(i)]),
       ),
-    [],
+    [activeRunes],
   );
 
   const filtered = useMemo(() => {
-    let list = [...marketRunes];
+    let list = [...activeRunes];
     if (search) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -105,7 +111,7 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
       return sortDir === "desc" ? bVal - aVal : aVal - bVal;
     });
     return list;
-  }, [search, sortKey, sortDir]);
+  }, [search, sortKey, sortDir, activeRunes]);
 
   function toggleSort(key: SortKey) {
     if (sortKey === key) {
@@ -126,9 +132,9 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
   }
 
   // Stats bar
-  const totalVol = marketRunes.reduce((s, r) => s + r.volume24h, 0);
-  const gainers = marketRunes.filter((r) => r.priceChange24h > 0).length;
-  const losers = marketRunes.length - gainers;
+  const totalVol = activeRunes.reduce((s, r) => s + r.volume24h, 0);
+  const gainers = activeRunes.filter((r) => r.priceChange24h > 0).length;
+  const losers = activeRunes.length - gainers;
 
   return (
     <main className="flex-1 overflow-y-auto p-4 lg:p-6 space-y-4">
@@ -136,8 +142,9 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
       <motion.div
         initial={{ opacity: 0, y: -10 }}
         animate={{ opacity: 1, y: 0 }}
-        className="flex flex-wrap gap-3"
+        className="flex flex-wrap items-center gap-3"
       >
+        <DataSourceBadge status={marketStatus ?? null} />
         {[
           {
             label: "24h Volume",
@@ -181,7 +188,7 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
         transition={{ delay: 0.1 }}
         className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5"
       >
-        {marketRunes
+        {[...activeRunes]
           .sort((a, b) => b.priceChange24h - a.priceChange24h)
           .slice(0, 5)
           .map((rune: MarketRune) => {
@@ -203,7 +210,7 @@ export function RunesMarket({ watchlist }: RunesMarketProps) {
                     </span>
                   </div>
                   <MiniSparkline
-                    data={sparklines[rune.runeId]}
+                    data={sparklines[rune.runeId] ?? generateSparkline(0)}
                     positive={isPos}
                   />
                 </div>

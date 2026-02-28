@@ -1,6 +1,5 @@
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Bell, ChevronDown, Crown, Wifi } from "lucide-react";
+import { Bell, ChevronDown, Download, Wifi } from "lucide-react";
 import type { WalletRecord } from "../backend.d";
 import { WalletType } from "../backend.d";
 
@@ -9,6 +8,10 @@ interface HeaderProps {
   onConnectWallet: () => void;
   currentPage: string;
   onNavigate: (page: string) => void;
+  /** Set when the browser fires beforeinstallprompt */
+  installPrompt?: Event | null;
+  /** Called to trigger the native install flow */
+  onInstall?: () => void;
 }
 
 function truncateAddress(address: string): string {
@@ -31,6 +34,8 @@ export function Header({
   onConnectWallet,
   currentPage,
   onNavigate,
+  installPrompt,
+  onInstall,
 }: HeaderProps) {
   const pageTitle: Record<string, string> = {
     dashboard: "Dashboard",
@@ -104,6 +109,19 @@ export function Header({
           <div className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
           <span className="font-mono text-[10px] tracking-wider">LIVE</span>
         </div>
+
+        {/* Install App button — shown when browser PWA prompt is available */}
+        {installPrompt && onInstall && (
+          <button
+            type="button"
+            onClick={onInstall}
+            title="Install Milady Oracle as an app"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors text-xs font-mono neon-text-cyan"
+          >
+            <Download size={12} />
+            <span className="hidden sm:inline tracking-wider">INSTALL</span>
+          </button>
+        )}
 
         {/* Notifications */}
         <button
