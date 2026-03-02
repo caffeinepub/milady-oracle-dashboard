@@ -231,6 +231,63 @@ export async function fetchOdinTokenTrades(
   return result;
 }
 
+/**
+ * Fetch ALL tokens from Odin.Fun by paginating through every page.
+ * Uses a page size of 50 and stops when a page returns fewer items than
+ * requested or when the running total reaches the reported `total` count.
+ * Caps at 20 pages (1000 tokens) as a safety limit.
+ */
+export async function fetchAllOdinTokens(params?: {
+  sort?: string;
+}): Promise<OdinTokensResponse> {
+  const PAGE_SIZE = 50;
+  const MAX_PAGES = 20;
+  const allTokens: OdinToken[] = [];
+  let page = 1;
+  let reportedTotal: number | undefined;
+
+  while (page <= MAX_PAGES) {
+    let result: OdinTokensResponse;
+    try {
+      result = await fetchOdinTokens({
+        sort: params?.sort ?? "marketcap:desc",
+        limit: PAGE_SIZE,
+        page,
+      });
+    } catch {
+      break;
+    }
+
+    const items: OdinToken[] =
+      result.data ?? (Array.isArray(result) ? (result as OdinToken[]) : []);
+
+    if (items.length === 0) break;
+
+    allTokens.push(...items);
+
+    if (reportedTotal === undefined && result.total != null) {
+      reportedTotal = result.total;
+    }
+
+    // Stop if we fetched everything or got a partial page
+    if (
+      items.length < PAGE_SIZE ||
+      (reportedTotal != null && allTokens.length >= reportedTotal)
+    ) {
+      break;
+    }
+
+    page++;
+  }
+
+  return {
+    data: allTokens,
+    total: reportedTotal ?? allTokens.length,
+    page: 1,
+    limit: allTokens.length,
+  };
+}
+
 /** Fetch the current BTC price in USD */
 export async function fetchOdinBtcPrice(): Promise<OdinBtcPrice> {
   const path = "/currency/btc";

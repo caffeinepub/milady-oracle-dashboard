@@ -9,6 +9,7 @@ import {
   Search,
   TrendingDown,
   TrendingUp,
+  Wallet,
   Zap,
 } from "lucide-react";
 import { motion } from "motion/react";
@@ -25,19 +26,21 @@ import {
 import { toast } from "sonner";
 import { AssetType, TradeType } from "../backend.d";
 import { DataSourceBadge } from "../components/DataSourceBadge";
+import { useWalletIdentity } from "../hooks/useWalletIdentity";
 import {
   BTC_USD_PRICE,
   type MarketRune,
   marketRunes,
+  mockBackend,
   mockTrades,
 } from "../mocks/backend";
 import type { MarketDataStatus } from "../services/liveMarket";
 import {
   type OdinDataStatus,
+  fetchAllOdinTokens,
   fetchOdinBtcPrice,
   fetchOdinTokenFeed,
   fetchOdinTokenTrades,
-  fetchOdinTokens,
   mapOdinTokenToRune,
   odinRawToBtc,
 } from "../services/odinFunApi";
@@ -120,6 +123,9 @@ interface OdinTradingProps {
 }
 
 export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
+  // ── Wallet identity (for on-chain trades) ───────────────────────────────────
+  const { identity, principalText } = useWalletIdentity();
+
   // ── Odin.Fun live data state ────────────────────────────────────────────────
   const [odinTokens, setOdinTokens] = useState<MarketRune[]>([]);
   const [odinStatus, setOdinStatus] = useState<OdinDataStatus | null>(null);
@@ -160,7 +166,7 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
   useEffect(() => {
     async function loadOdinData() {
       const [tokensResult, btcResult] = await Promise.allSettled([
-        fetchOdinTokens({ sort: "marketcap:desc", limit: 50 }),
+        fetchAllOdinTokens({ sort: "marketcap:desc" }),
         fetchOdinBtcPrice(),
       ]);
 
@@ -208,9 +214,6 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
       }),
     );
   }, []);
-
-  // ── Sync selectedRune when odinTokens first populates ─────────────────────
-  // (handled inside loadOdinData above)
 
   // ── Load feed when selectedRune changes (only if live) ─────────────────────
   useEffect(() => {
@@ -301,18 +304,173 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
     setLiveTradeRows([]);
   }
 
+  // Determine if we have a usable ICP identity for on-chain trading
+  const hasIcpIdentity = (() => {
+    if (!identity) return false;
+    try {
+      return !identity.getPrincipal().isAnonymous();
+    } catch {
+      return false;
+    }
+  })();
+
   async function handleTrade() {
     if (!amount || Number(amount) <= 0) {
       toast.error("Enter a valid amount");
       return;
     }
     setIsLoading(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setIsLoading(false);
-    toast.success(
-      `${tradeType === "buy" ? "Buy" : "Sell"} order placed: ${Number(amount).toLocaleString()} ${selectedRune.symbol} @ ${Number(price).toFixed(8)} BTC`,
-    );
-    setAmount("");
+
+    try {
+      const { executeOdinTrade, executeOdinTradeWithAgent } = await import(
+        "../services/odinFunCanister"
+      );
+      const { getOisyWallet, getPlugAgent } = await import(
+        "../services/walletDetect"
+      );
+
+      const rawAmount = BigInt(Math.round(Number(amount) * 1_000));
+      const tradeAmount =
+        tradeType === "buy" ? { btc: rawAmount } : { token: rawAmount };
+
+      const oisyWallet = getOisyWallet();
+      const plugAgent = getPlugAgent();
+
+      // ── Path 1: Real ICP identity directly available ─────────────────────
+      if (hasIcpIdentity && identity) {
+        const result = await executeOdinTrade(
+          selectedRune.runeId,
+          tradeType,
+          tradeAmount,
+          identity,
+        );
+        setIsLoading(false);
+        if (result.ok) {
+          toast.success(
+            `${tradeType === "buy" ? "Buy" : "Sell"} executed on Odin.Fun: ${Number(amount).toLocaleString()} ${selectedRune.symbol}`,
+          );
+          // Persist trade to local state
+          try {
+            await mockBackend.addTradeRecord({
+              id: `trade-${Date.now()}`,
+              tradeType: tradeType === "buy" ? TradeType.buy : TradeType.sell,
+              asset: selectedRune.runeName,
+              assetType: AssetType.rune,
+              amount: Number(amount),
+              price: Number(price),
+              totalValue: totalCost,
+              timestamp: BigInt(Date.now()),
+              status: "confirmed",
+              walletAddress: principalText ?? "",
+            });
+          } catch {
+            /* silently ignore backend persistence failure */
+          }
+        } else {
+          toast.error(`Trade failed: ${result.error ?? "Unknown error"}`);
+        }
+        setAmount("");
+        return;
+      }
+
+      // ── Path 2: Plug agent is available ─────────────────────────────────
+      if (plugAgent) {
+        try {
+          const result = await executeOdinTradeWithAgent(
+            selectedRune.runeId,
+            tradeType,
+            tradeAmount,
+            plugAgent,
+          );
+          setIsLoading(false);
+          if (result.ok) {
+            toast.success(
+              `Trade executed via Plug: ${Number(amount).toLocaleString()} ${selectedRune.symbol}`,
+            );
+            // Persist trade to local state
+            try {
+              await mockBackend.addTradeRecord({
+                id: `trade-${Date.now()}`,
+                tradeType: tradeType === "buy" ? TradeType.buy : TradeType.sell,
+                asset: selectedRune.runeName,
+                assetType: AssetType.rune,
+                amount: Number(amount),
+                price: Number(price),
+                totalValue: totalCost,
+                timestamp: BigInt(Date.now()),
+                status: "confirmed",
+                walletAddress: principalText ?? "plug",
+              });
+            } catch {
+              /* silently ignore */
+            }
+          } else {
+            toast.error(`Plug trade failed: ${result.error}`);
+          }
+          setAmount("");
+          return;
+        } catch {
+          // fall through to OISY path or simulation
+        }
+      }
+
+      // ── Path 3: OISY wallet instance + agent ────────────────────────────
+      if (oisyWallet) {
+        try {
+          const agent = oisyWallet.agent;
+          if (agent) {
+            const result = await executeOdinTradeWithAgent(
+              selectedRune.runeId,
+              tradeType,
+              tradeAmount,
+              agent,
+            );
+            setIsLoading(false);
+            if (result.ok) {
+              toast.success(
+                `Trade executed via OISY: ${Number(amount).toLocaleString()} ${selectedRune.symbol}`,
+              );
+              // Persist trade to local state
+              try {
+                await mockBackend.addTradeRecord({
+                  id: `trade-${Date.now()}`,
+                  tradeType:
+                    tradeType === "buy" ? TradeType.buy : TradeType.sell,
+                  asset: selectedRune.runeName,
+                  assetType: AssetType.rune,
+                  amount: Number(amount),
+                  price: Number(price),
+                  totalValue: totalCost,
+                  timestamp: BigInt(Date.now()),
+                  status: "confirmed",
+                  walletAddress: principalText ?? "oisy",
+                });
+              } catch {
+                /* silently ignore */
+              }
+            } else {
+              toast.error(`OISY trade failed: ${result.error}`);
+            }
+            setAmount("");
+            return;
+          }
+        } catch {
+          // fall through to simulation
+        }
+      }
+
+      // ── Simulation fallback ─────────────────────────────────────────────
+      await new Promise((r) => setTimeout(r, 1200));
+      setIsLoading(false);
+      toast.success(
+        `[SIM] ${tradeType === "buy" ? "Buy" : "Sell"} order: ${Number(amount).toLocaleString()} ${selectedRune.symbol} @ ${Number(price).toFixed(8)} BTC`,
+      );
+      setAmount("");
+    } catch (err) {
+      console.warn("[OdinTrading] Trade error:", err);
+      setIsLoading(false);
+      toast.error("Trade failed — please try again");
+    }
   }
 
   // Combined status for header badge — prefer Odin live status
@@ -339,6 +497,13 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
           Rune trading on Internet Computer
         </p>
         <div className="ml-auto flex items-center gap-2 flex-wrap">
+          {/* ICP wallet status */}
+          {hasIcpIdentity ? (
+            <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[9px] font-mono font-bold border border-green-400/30 bg-green-400/10 text-green-400 tracking-[0.1em]">
+              <Wallet size={9} />
+              ON-CHAIN READY
+            </span>
+          ) : null}
           {/* Odin live badge */}
           {odinStatus?.source === "live" && (
             <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[9px] font-mono font-bold border border-cyan-400/30 bg-cyan-400/10 text-cyan-400 tracking-[0.12em]">
@@ -346,6 +511,9 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
               ODIN LIVE
             </span>
           )}
+          <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[9px] font-mono font-bold border border-purple-400/30 bg-purple-400/10 text-purple-400 tracking-[0.1em]">
+            CANISTER: z2vm5
+          </span>
           <DataSourceBadge status={displayStatus} />
           <Badge
             variant="outline"
@@ -579,6 +747,25 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
         >
           {/* Buy/Sell form */}
           <div className="glass-card rounded-lg p-4">
+            {/* Wallet connection status for on-chain trading */}
+            <div className="mb-3">
+              {hasIcpIdentity ? (
+                <div className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-green-400/20 bg-green-400/5 text-[9px] font-mono text-green-400">
+                  <Wallet size={9} />
+                  <span>
+                    ICP wallet connected — trades execute on-chain via canister
+                  </span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 px-2 py-1.5 rounded border border-border/20 bg-muted/20 text-[9px] font-mono text-muted-foreground">
+                  <Wallet size={9} />
+                  <span>
+                    Connect OISY or Plug to trade on-chain — simulation active
+                  </span>
+                </div>
+              )}
+            </div>
+
             <Tabs
               value={tradeType}
               onValueChange={(v) => setTradeType(v as "buy" | "sell")}
@@ -610,6 +797,7 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
                   onPriceChange={setPrice}
                   onSubmit={handleTrade}
                   isLoading={isLoading}
+                  isOnChain={hasIcpIdentity}
                 />
               </TabsContent>
               <TabsContent value="sell" className="space-y-3 mt-0">
@@ -624,6 +812,7 @@ export function OdinTrading({ liveRunes, marketStatus }: OdinTradingProps) {
                   onPriceChange={setPrice}
                   onSubmit={handleTrade}
                   isLoading={isLoading}
+                  isOnChain={hasIcpIdentity}
                 />
               </TabsContent>
             </Tabs>
@@ -702,6 +891,7 @@ interface TradeFormProps {
   onPriceChange: (v: string) => void;
   onSubmit: () => void;
   isLoading: boolean;
+  isOnChain?: boolean;
 }
 
 function TradeForm({
@@ -715,6 +905,7 @@ function TradeForm({
   onPriceChange,
   onSubmit,
   isLoading,
+  isOnChain,
 }: TradeFormProps) {
   const isBuy = tradeType === "buy";
   return (
@@ -789,6 +980,16 @@ function TradeForm({
           <span className="text-muted-foreground">Network Fee</span>
           <span className="text-muted-foreground">~0.00001 BTC</span>
         </div>
+        <div className="flex justify-between text-[9px] font-mono">
+          <span className="text-muted-foreground">Execution</span>
+          <span
+            className={
+              isOnChain ? "text-green-400" : "text-muted-foreground/60"
+            }
+          >
+            {isOnChain ? "On-Chain" : "Simulated"}
+          </span>
+        </div>
       </div>
 
       <Button
@@ -807,7 +1008,7 @@ function TradeForm({
             PROCESSING...
           </span>
         ) : (
-          `${isBuy ? "BUY" : "SELL"} ${rune.symbol}`
+          `${isBuy ? "BUY" : "SELL"} ${rune.symbol}${isOnChain ? "" : " [SIM]"}`
         )}
       </Button>
     </div>

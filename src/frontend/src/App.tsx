@@ -5,6 +5,7 @@ interface BeforeInstallPromptEvent extends Event {
 }
 
 import { Toaster } from "@/components/ui/sonner";
+import type { Identity } from "@dfinity/agent";
 import type { Principal } from "@icp-sdk/core/principal";
 import { useCallback, useEffect, useState } from "react";
 import type {
@@ -18,6 +19,10 @@ import type {
 import { Header } from "./components/Header";
 import { Sidebar } from "./components/Sidebar";
 import { WalletConnectModal } from "./components/WalletConnectModal";
+import {
+  WalletIdentityProvider,
+  useWalletIdentity,
+} from "./hooks/useWalletIdentity";
 import {
   type MarketRune,
   mockBackend,
@@ -78,7 +83,11 @@ function MobileNav({
   );
 }
 
-export default function App() {
+// ── AppInner — uses WalletIdentityProvider context ────────────────────────────
+
+function AppInner() {
+  const { setIdentity } = useWalletIdentity();
+
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
   const [connectedWallet, setConnectedWallet] = useState<WalletRecord | null>(
     null,
@@ -155,14 +164,35 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const handleWalletConnect = useCallback((wallet: WalletRecord) => {
-    setConnectedWallet(wallet);
-    // Add to wallets list if not already present
-    setWallets((prev) => {
-      if (prev.find((w) => w.id === wallet.id)) return prev;
-      return [...prev, wallet];
-    });
-  }, []);
+  const handleWalletConnect = useCallback(
+    async (wallet: WalletRecord, identity?: Identity) => {
+      setConnectedWallet(wallet);
+
+      // Store identity in context so OdinTrading can use it for canister calls
+      if (identity) {
+        setIdentity(identity);
+      }
+
+      // Add to wallets list if not already present
+      setWallets((prev) => {
+        if (prev.find((w) => w.id === wallet.id)) return prev;
+        return [...prev, wallet];
+      });
+
+      // Persist wallet to local mock backend (fire-and-forget, idempotent)
+      try {
+        await mockBackend.createProfile("", "");
+      } catch {
+        // Silently ignore
+      }
+      try {
+        await mockBackend.addWallet(wallet);
+      } catch {
+        // Silently ignore
+      }
+    },
+    [setIdentity],
+  );
 
   const navigate = useCallback((page: string) => {
     setCurrentPage(page as Page);
@@ -309,5 +339,15 @@ export default function App() {
         }}
       />
     </div>
+  );
+}
+
+// ── Default export — wraps AppInner in WalletIdentityProvider ─────────────────
+
+export default function App() {
+  return (
+    <WalletIdentityProvider>
+      <AppInner />
+    </WalletIdentityProvider>
   );
 }

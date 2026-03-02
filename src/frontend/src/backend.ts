@@ -184,6 +184,7 @@ export interface backendInterface {
     addTradeRecord(trade: TradeRecord): Promise<void>;
     addWallet(wallet: WalletRecord): Promise<void>;
     addWatchlistItem(item: WatchlistItem): Promise<void>;
+    createProfile(username: string, avatarUrl: string): Promise<void>;
     getMyOrdinals(): Promise<Array<OrdinalItem>>;
     getMyProfile(): Promise<UserProfile>;
     getMyRuneHoldings(): Promise<Array<RuneHolding>>;
@@ -264,6 +265,20 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.addWatchlistItem(to_candid_WatchlistItem_n11(this._uploadFile, this._downloadFile, arg0));
+            return result;
+        }
+    }
+    async createProfile(arg0: string, arg1: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.createProfile(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.createProfile(arg0, arg1);
             return result;
         }
     }

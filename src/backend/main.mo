@@ -170,6 +170,29 @@ actor {
     };
   };
 
+  public shared ({ caller }) func createProfile(
+    username : Text,
+    avatarUrl : Text,
+  ) : async () {
+    let defaultPrefs : Preferences = {
+      theme = "dark";
+      currency = "USD";
+      notifications = true;
+    };
+    let newProfile : UserProfile = {
+      principal = caller;
+      username;
+      avatarUrl;
+      createdAt = Time.now();
+      preferences = defaultPrefs;
+    };
+
+    switch (profiles.get(caller)) {
+      case (null) { profiles.add(caller, newProfile) };
+      case (?_) {};
+    };
+  };
+
   // Wallet Functions
   public shared ({ caller }) func getMyWallets() : async [WalletRecord] {
     ensureUserProfile(caller);

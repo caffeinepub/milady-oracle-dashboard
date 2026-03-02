@@ -692,6 +692,10 @@ export const mockBackend: backendInterface = {
   async updateMyProfile(username, avatarUrl, preferences) {
     profile = { ...profile, username, avatarUrl, preferences };
   },
+  async createProfile(username, avatarUrl) {
+    if (username) profile = { ...profile, username };
+    if (avatarUrl) profile = { ...profile, avatarUrl };
+  },
 };
 
 export const BTC_USD_PRICE = BTC_PRICE;

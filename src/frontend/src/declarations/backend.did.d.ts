@@ -99,6 +99,7 @@ export interface _SERVICE {
   'addTradeRecord' : ActorMethod<[TradeRecord], undefined>,
   'addWallet' : ActorMethod<[WalletRecord], undefined>,
   'addWatchlistItem' : ActorMethod<[WatchlistItem], undefined>,
+  'createProfile' : ActorMethod<[string, string], undefined>,
   'getMyOrdinals' : ActorMethod<[], Array<OrdinalItem>>,
   'getMyProfile' : ActorMethod<[], UserProfile>,
   'getMyRuneHoldings' : ActorMethod<[], Array<RuneHolding>>,

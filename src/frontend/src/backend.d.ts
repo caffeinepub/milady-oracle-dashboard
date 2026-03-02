@@ -102,6 +102,7 @@ export interface backendInterface {
     addTradeRecord(trade: TradeRecord): Promise<void>;
     addWallet(wallet: WalletRecord): Promise<void>;
     addWatchlistItem(item: WatchlistItem): Promise<void>;
+    createProfile(username: string, avatarUrl: string): Promise<void>;
     getMyOrdinals(): Promise<Array<OrdinalItem>>;
     getMyProfile(): Promise<UserProfile>;
     getMyRuneHoldings(): Promise<Array<RuneHolding>>;

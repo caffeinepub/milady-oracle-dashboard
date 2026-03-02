@@ -7,6 +7,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import type { Identity } from "@dfinity/agent";
 import {
   CheckCircle2,
   ExternalLink,
@@ -18,6 +19,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { type WalletRecord, WalletType } from "../backend.d";
 import {
+  type ConnectionResult,
   type WalletConnectionMethod,
   type WalletInfo,
   connectRealWallet,
@@ -177,7 +179,8 @@ type ConnectingState =
 interface WalletConnectModalProps {
   open: boolean;
   onClose: () => void;
-  onConnect: (wallet: WalletRecord) => void;
+  /** Called when a wallet connects successfully. Identity is provided for ICP wallets. */
+  onConnect: (wallet: WalletRecord, identity?: Identity) => void;
   /** Legacy prop — kept for backwards compat but we re-detect on open */
   detectedWallets?: WalletType[];
 }
@@ -263,13 +266,18 @@ export function WalletConnectModal({
       return;
     }
 
-    // ── Success ─────────────────────────────────────────────────────────────
+    // ── Success — result is a ConnectionResult object ────────────────────────
+    const connResult = result as ConnectionResult;
     setConnectingState("connected");
     await new Promise((r) => setTimeout(r, 600));
-    finishConnect(meta, result);
+    finishConnect(meta, connResult.address, connResult.identity);
   };
 
-  const finishConnect = (meta: WalletMeta, address: string) => {
+  const finishConnect = (
+    meta: WalletMeta,
+    address: string,
+    identity?: Identity,
+  ) => {
     const wallet: WalletRecord = {
       id: `wallet-${meta.type}-${Date.now()}`,
       walletType: meta.type,
@@ -278,7 +286,7 @@ export function WalletConnectModal({
       address,
       walletLabel: `${meta.name} Wallet`,
     };
-    onConnect(wallet);
+    onConnect(wallet, identity);
     setConnectingType(null);
     setConnectingState("idle");
     setPendingWallet(null);
